@@ -319,13 +319,13 @@ public class SspBench implements Runnable {
 			switch (p.step) {
 			case ClientInfo.STEP_KEY:
 				if (type.equalsIgnoreCase("Connect.Key")) {
+					keys.incrementAndGet();
+					
 					p.recvKey = root.getText();
 					p.step = ClientInfo.STEP_LOGIN;
 
-					keys.incrementAndGet();
-
 					int i = index * nconns + p.index;
-					String user = users.get(i);
+					String user = users.get(i % users.size());
 
 					return doSend(ch, p, "<request type=\"User.Login\"><params><username>" + user + "</username><password>123456</password><timezone>" + (-new Date().getTimezoneOffset() * 60) + "</timezone></params></request>", true);
 				} else {
@@ -356,14 +356,13 @@ public class SspBench implements Runnable {
 					requestFailures.incrementAndGet();
 
 					return doSend(ch, p, "<request type=\"Gold.State\"/>", true);
-				} else if (type.equalsIgnoreCase("User.Login.Failed")) {
+				} else {
 					loginOfflines.incrementAndGet();
 
 					System.out.println(root.getText());
 
 					return false;
 				}
-				break;
 			}
 		} catch (DocumentException e) {
 			System.out.println("doRecv(" + index + "," + p.index + "): " + xmlString);
@@ -496,21 +495,12 @@ public class SspBench implements Runnable {
 
 		for (i = 0; i < nconns; i++) {
 			try {
-				ch = SocketChannel.open(addr);
+				ch = SocketChannel.open();
 				p = new ClientInfo(i);
 
 				ch.configureBlocking(false);
-
-				Boolean b = doSend(ch, p, "<request type=\"Connect.Key\">" + p.sendKey + "</request>");
-				if (!b) {
-					ch.shutdownInput();
-					ch.shutdownOutput();
-					ch.close();
-					continue;
-				}
-
-				ch.register(selector, SelectionKey.OP_READ).attach(p);
-				conns.incrementAndGet();
+				ch.connect(addr);
+				ch.register(selector, SelectionKey.OP_CONNECT, p);
 				selectorSize++;
 			} catch (Exception e) {
 				// e.printStackTrace();
@@ -538,12 +528,40 @@ public class SspBench implements Runnable {
 
 				ch = (SocketChannel) key.channel();
 				p = (ClientInfo) key.attachment();
+				
+				if(key.isConnectable()) {
+					try {
+						ch.finishConnect();
+						Boolean b = doSend(ch, p, "<request type=\"Connect.Key\">" + p.sendKey + "</request>");
+						if (b) {
+							key.interestOps(SelectionKey.OP_READ);
+							key.selector().wakeup();
+							conns.incrementAndGet();
+						} else {
+							key.interestOps(key.interestOps() & (~SelectionKey.OP_CONNECT));
+							key.cancel();
+							ch.shutdownInput();
+							ch.shutdownOutput();
+							ch.close();
+							selectorSize--;
+						}
+					} catch (IOException e) {
+						key.interestOps(key.interestOps() & (~SelectionKey.OP_CONNECT));
+						key.cancel();
+						selectorSize--;
+					}
+					continue;
+				}
 
 				if (readBuffer(ch, p)) {
 					// 没有可用字节,继续监听OP_READ
 					key.interestOps(key.interestOps() | SelectionKey.OP_READ);
 					key.selector().wakeup();
 					continue;
+				}
+				
+				if(p.step != ClientInfo.STEP_KEY) {
+					SspBench.keys.decrementAndGet();
 				}
 
 				conns.decrementAndGet();
